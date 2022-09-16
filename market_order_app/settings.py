@@ -12,7 +12,6 @@ https://docs.djangoproject.com/en/4.1/ref/settings/
 
 import os
 from pathlib import Path
-import dj_database_url
 import environ
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -94,7 +93,7 @@ WSGI_APPLICATION = "market_order_app.wsgi.application"
 
 # Database
 # https://docs.djangoproject.com/en/4.1/ref/settings/#databases
-DATABASE_URL = os.environ.get('DATABASE_URL')
+# DATABASE_URL = os.environ.get('DATABASE_URL') # optional, can be used with dj-database-url module
 DATABASES = {
     # "default": dj_database_url.parse(DATABASE_URL)
     'default': env.db(),
