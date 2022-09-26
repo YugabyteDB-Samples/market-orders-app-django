@@ -8,7 +8,7 @@ Check [this blog post](https://www.yugabyte.com/blog/building-simple-application
 **How the application ingests the PubNub Market Orders stream data:**
 
 - **Method 1:** : Subscribe to the data stream via API endpoint (inside View) and then store the data in YugabyteDB.
-- **Method 2:** : Subscribe to the data stream by creating Celery task (running it in background) to store the data in YugabyteDB. For long running tasks like storing the realtime data stream to database, its recommended to to use the tasks queues.
+- **Method 2:** : Subscribe to the data stream by creating Celery task (running it in background) to store the data in YugabyteDB. For long running tasks like storing the realtime data stream to database, it's recommended to use the tasks queues.
 
 ## Run using YugabyteDB Managed
 
@@ -80,9 +80,9 @@ $python manage.py runscript seed_user_data
 - **Method 2:** Running the Celery task with  the application to ingest the data
     - [Install redis](https://redis.io/docs/getting-started/installation/), to use it as a broker and backed tp store the task results. For  backend you can also use YugabyteDB, by twealking the celery backed configuration in the `market_order_app/settings.py` file.
     - Open 3 terminal windows to run -`redis-server`, `celery worker` (in Django project directory) and Django app server to run respectively.
-        - terminale 1: `redis-server`
-        - terminale 2: `celery -A market_order_app worker --loglevel=info --concurrency 3`  # starts the celery worker to take tasks from the redis queue
-        - terminale 3: `$ python manage.py runserver`
+        - terminal 1: `redis-server`
+        - terminal 2: `celery -A market_order_app worker --loglevel=info --concurrency 3`  # starts the celery worker to take tasks from the redis queue
+        - terminal 3: `$ python manage.py runserver`
 
     - **Celery worker receiving task request**
     ![Celery worker receiving task request](/Docs/images/celery_worker_ingest_data_request.png)
