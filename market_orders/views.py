@@ -1,23 +1,20 @@
-import logging
 import threading
-
-import pubnub as pn
-from pubnub import utils
-from pubnub.pubnub import PubNub
-
-from django.shortcuts import render
+import logging
+from django.db.models import Count
+from market_orders.models import User2, Trade2
+from django.apps import apps
 from django.http import JsonResponse
-from scripts.pubnub_stream_utils import (
-    DEFAULT_EVENTS_CHANNEL_NAME,
-    ingest_pubnub_stream_data,
-    pubnub_config,
-)
-from scripts.db import database_connection
+from django.shortcuts import render
+from pubnub import utils
+from market_orders.scripts.pubnub_stream_utils import ingest_pubnub_stream_data
+from celery.result import AsyncResult
+from django.views.decorators.csrf import csrf_exempt
+from market_orders.tasks import ingest_pubnub_stream_data_task
 
-pn.set_stream_logger("pubnub", logging.INFO)
-logger = logging.getLogger("market_orders")
-pubnub = PubNub(pubnub_config())
-logger.info("SDK Version: %s", pubnub.SDK_VERSION)
+
+APP_CONFIG = apps.get_app_config('market_orders')
+PUBNUB = APP_CONFIG.pubnub
+
 APP_KEY = utils.uuid()
 
 
@@ -26,7 +23,7 @@ def home(request):
     return render(
         request,
         "index.html",
-        {"title": "Home page", "channel": DEFAULT_EVENTS_CHANNEL_NAME},
+        {"title": "Home page", "channel": None},
     )
 
 
@@ -37,12 +34,12 @@ def app_key(request):
 
 def subscription_add(request):
     """Adds a new subscription"""
-    channel = request.args.get("channel")
+    channel = request.GET.get("channel", None)
     if channel is None:
-        return JsonResponse({"error": "Channel missing"}, status=500, safe=False)
-    pubnub.subscribe().channels(channel).execute()
+        return JsonResponse({"message": "Channel missing", "status": 400}, status=400, safe=False)
+    PUBNUB.subscribe().channels(channel).execute()
     return JsonResponse(
-        {"subscribed_channels": pubnub.get_subscribed_channels()},
+        {"subscribed_channels": PUBNUB.get_subscribed_channels()},
         status=200,
         safe=False,
     )
@@ -50,17 +47,17 @@ def subscription_add(request):
 
 def subscription_remove(request):
     """Removes a subscription"""
-    channel = request.args.get("channel")
+    channel = request.GET.get("channel", None)
     if channel is None:
-        return JsonResponse({"error": "Channel missing"}, status=500, safe=False)
-    pubnub.unsubscribe().channels(channel).execute()
+        return JsonResponse({"message": "Channel missing", "status": 400}, status=400, safe=False)
+    PUBNUB.unsubscribe().channels(channel).execute()
     return JsonResponse({"removed subscribed channel": channel}, status=200, safe=False)
 
 
 def subscription_list(request):
     """Returns a list of all subscriptions"""
     return JsonResponse(
-        {"subscribed_channels": pubnub.get_subscribed_channels()},
+        {"subscribed_channels": PUBNUB.get_subscribed_channels()},
         status=200,
         safe=False,
     )
@@ -68,12 +65,14 @@ def subscription_list(request):
 
 def ingest_stream_data(request):
     """Ingests trade data from pubnub stream and writes to database as per channel"""
-    channel = request.args.get("channel")
+    channel = request.GET.get("channel", None)
     if channel is None:
-        return JsonResponse({"error": "Channel missing"}, status=500, safe=False)
+        return JsonResponse({"message": "Channel missing", "status": 400}, status=400, safe=False)
+    logging.basicConfig(level=logging.DEBUG, format='%(relativeCreated)6d %(threadName)s %(message)s')
+
     thread = threading.Thread(
         target=ingest_pubnub_stream_data,
-        kwargs={"channel": channel, "pubnub_obj": pubnub},
+        kwargs={"channel": channel, "pubnub_obj": PUBNUB}
     )
     thread.start()
     return JsonResponse({"message": "Request accepted"}, status=202, safe=False)
@@ -81,28 +80,15 @@ def ingest_stream_data(request):
 
 def get_trade_stats(request):
     """Returns trade stats"""
-    conn = database_connection()
-    conn.set_session(autocommit=True)
-    cur = conn.cursor()
+    top_symbol_query_Set = Trade2.objects.all().values('symbol').annotate(total=Count('symbol')).order_by('total')
+    top_symbol = top_symbol_query_Set.first()
 
-    top_symbol_query = (
-        'select symbol from public."Trade" group by symbol order by count(*) desc;'
-    )
-    cur.execute(top_symbol_query)
-    top_symbol = cur.fetchone()[0]
-
-    top_buyer_query = "select first_name, last_name, total_portfolio_value::float  from top_buyers_view tbv  where  total_portfolio_value  = (select max(total_portfolio_value) from top_buyers_view tbv2);"
-    cur.execute(top_buyer_query)
-    top_buyer_query_res = cur.fetchall()
+    # top_buyer_query = "select first_name, last_name, total_portfolio_value::float  from top_buyers_view tbv  where  total_portfolio_value  = (select max(total_portfolio_value) from top_buyers_view tbv2);"
     top_buyer = dict()
-    top_buyer["first_name"] = top_buyer_query_res[0][0]
-    top_buyer["last_name"] = top_buyer_query_res[0][1]
-    top_buyer["total_portfolio_value"] = top_buyer_query_res[0][2]
-
-    total_trade_count_query = 'select count(id) from public."Trade" t;'
-    cur.execute(total_trade_count_query)
-    total_trade_count = cur.fetchone()[0]
-
+    top_buyer["first_name"] = None
+    top_buyer["last_name"] = None
+    top_buyer["total_portfolio_value"] = None
+    total_trade_count = Trade2.objects.values_list('trade_id', flat=True).count()
     return JsonResponse(
         {
             "total_trade_count": total_trade_count,
@@ -112,3 +98,39 @@ def get_trade_stats(request):
         status=200,
         safe=False,
     )
+
+
+@csrf_exempt
+def ingest_stream_data_via_celery_task(request):
+    """Ingests trade data from pubnub stream and writes to database as per channel via celery task"""
+    if request.method == "POST":
+        channel = request.POST.get("channel")
+        task_type = request.POST.get("task_type", "start")
+        task_id_to_terminate = request.POST.get("task_id", None)
+        task = ingest_pubnub_stream_data_task.delay(task_type=task_type, channel=channel, task_id=None) # can use apply_async() for serializers
+        if task_type == "start":
+            return JsonResponse({"task_id": task.id}, status=202, safe=False,)
+        elif task_type == "stop":
+            task_result = AsyncResult(task.task_id)
+            result = {
+                "terminated_task_id": task_id_to_terminate,
+                "task_id": task_result.task_id,
+                "task_status": task_result.status,
+            }
+            return JsonResponse(result, status=200)
+    else:
+        return JsonResponse({"messsage": "Method not implemented"}, status=501, safe=False,)
+
+
+@csrf_exempt
+def get_task_status(request, task_id):
+    task_result = AsyncResult(task_id)
+    task_execution_result = None
+    if task_result.status != "REVOKED":
+        task_execution_result = task_result.result
+    result = {
+        "task_id": task_id,
+        "task_status": task_result.status,
+        "task_result": task_execution_result
+    }
+    return JsonResponse(result, status=200)
